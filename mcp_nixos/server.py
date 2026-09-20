@@ -83,6 +83,14 @@ from .sources import (
     _flake_inputs_list,
     _flake_inputs_ls,
     _flake_inputs_read,
+    # Arbitrary flakes (source=<flake-ref>)
+    _flake_ref_browse,
+    _flake_ref_cache,
+    _flake_ref_info,
+    _flake_ref_search_options,
+    _flake_ref_search_packages,
+    _flake_ref_stats,
+    _flake_ref_store,
     _flatten_inputs,
     _format_nixvim_option,
     _format_nvf_option,
@@ -132,6 +140,7 @@ from .sources import (
     _stats_nvf,
     _store_ls,
     _store_read,
+    _validate_flake_ref,
     es_query,
     get_channel_suggestions,
     get_channels,
@@ -163,6 +172,10 @@ _SERVER_INSTRUCTIONS = (
     "paths, or the NixOS wiki and nix.dev docs. It queries live APIs (search.nixos.org, "
     "NixHub, FlakeHub, cache.nixos.org) and is faster and more current than `nix search`, "
     "scraping search.nixos.org by hand, or running `gh api` against NixOS/nixpkgs.\n\n"
+    "Beyond nixpkgs, any flake ref (bare alias like `nixpkgs`, or a scheme ref like "
+    "`github:owner/repo`) works as a `source` value: you can then search its packages and "
+    "the options of its `nixosModules`/`homeManagerModules`, check the binary cache, or "
+    "read files from the materialized flake.\n\n"
     "Trigger on any mention of a Nix package name, attribute path, NixOS / "
     "home-manager / darwin option, channel name (unstable, 25.05, ...), flake input, "
     "or `/nix/store/` path. Use even when you think you know the answer — your training "
@@ -182,6 +195,8 @@ _SERVER_INSTRUCTIONS = (
     '  "does X have a binary cache?"        → nix {"action":"cache","query":"X"}\n'
     '  "read /nix/store/<path>"             → nix {"action":"store","type":"read","query":"/nix/store/<path>"}\n'
     '  "which commit shipped X version Y?"  → nix_versions {"package":"X","version":"Y"}\n'
+    '  "search packages in flake F"         → nix {"action":"search","source":"github:owner/repo","query":"X"}\n'
+    '  "search options in flake F"          → nix {"action":"search","type":"options","source":"F","query":"X"}\n'
 )
 
 mcp = FastMCP("mcp-nixos", version=__version__, instructions=_SERVER_INSTRUCTIONS)
@@ -228,8 +243,10 @@ async def nix(
         str,
         "Data source for search/info/stats/browse/cache. One of: nixos (default), "
         "home-manager, darwin, flakes, flakehub, nixvim, nvf, wiki, nix-dev, noogle, nixhub. "
+        "Any other value is treated as an arbitrary nix flake ref (e.g. `github:owner/repo` "
+        "or `nixpkgs`) and those actions operate on that flake. "
         "For action=flake-inputs, this may instead be a path to a flake directory; "
-        "omit/default to use the current project. Ignored by action=store.",
+        "omit/default to use the current project. Ignored by action=store for known sources.",
     ] = "nixos",
     type: Annotated[
         str,
@@ -273,6 +290,8 @@ async def nix(
       "ls inside flake input X"           → {"action": "flake-inputs", "type": "ls", "query": "X"}
       "read /nix/store/... file"          → {"action": "store", "type": "read", "query": "/nix/store/..."}
       "ls /nix/store/... dir"             → {"action": "store", "type": "ls",   "query": "/nix/store/..."}
+      "search packages in a flake ref"    → {"action": "search", "source": "github:owner/repo", "query": "X"}
+      "search module options in a flake"  → {"action": "search", "type": "options", "source": "F", "query": "X"}
 
     For package version *history* ("which commit shipped firefox 150?", "when was node 18 added?"),
     use the separate `nix_versions` tool — it returns commit hashes, attribute paths, and dates.
@@ -290,6 +309,11 @@ async def nix(
         If multiple packages share a pname (e.g. firefox / firefox-esr / firefox-mobile), the
         canonical attribute wins and the response flags the disambiguation explicitly.
       - Omit parameters you don't need; do not pass empty strings for optional args.
+      - Any `source` that is not a known source name is treated as a nix flake ref
+        (bare alias like `nixpkgs`, or a scheme ref like `github:owner/repo`).
+        Packages resolve from `packages.<system>.*`; module options are evaluated
+        from the flake's `nixosModules.*` and `homeManagerModules.*` via the Nix
+        module system (requires nix locally).
     """
     # Limit validation: flake-inputs/store read allow up to 2000, others limited to 100
     if action == "flake-inputs" and type == "read":
@@ -337,10 +361,15 @@ async def nix(
         elif source == "nixhub":
             return await _search_nixhub(query, limit)
         else:
-            return error(
-                f"Unknown source: {source!r}. Must be one of: "
-                "nixos, home-manager, darwin, flakes, flakehub, nixvim, nvf, wiki, nix-dev, noogle, nixhub."
-            )
+            # Last resort: any value outside KNOWN_SOURCES is a flake ref.
+            if type not in ["packages", "options"]:
+                return error(
+                    "For a flake-ref source, type must be one of: packages, options. "
+                    'Example: {"action": "search", "source": "github:owner/repo", "query": "foo"}'
+                )
+            if type == "options":
+                return await _flake_ref_search_options(source, query, limit)
+            return await _flake_ref_search_packages(source, query, limit)
 
     elif action == "info":
         if not query:
@@ -377,10 +406,14 @@ async def nix(
         elif source == "nixhub":
             return await _info_nixhub(query)
         else:
-            return error(
-                f"Unknown source: {source!r}. For action=info, must be one of: "
-                "nixos, home-manager, darwin, flakehub, nixvim, nvf, wiki, nix-dev, noogle, nixhub."
-            )
+            # Last resort: any value outside KNOWN_SOURCES is a flake ref.
+            if type not in ["package", "packages", "option", "options"]:
+                return error(
+                    "For a flake-ref source, type must be 'package' or 'option'. "
+                    'Example: {"action": "info", "source": "github:owner/repo", "query": "foo", "type": "package"}'
+                )
+            info_type = "package" if type in ["package", "packages"] else "option"
+            return await _flake_ref_info(source, query, info_type)
 
     elif action == "stats":
         if source == "nixos":
@@ -402,10 +435,8 @@ async def nix(
         elif source in ["wiki", "nix-dev", "nixhub"]:
             return error(f"Stats not available for source={source}.")
         else:
-            return error(
-                f"Unknown source: {source!r}. For action=stats, must be one of: "
-                "nixos, home-manager, darwin, flakes, flakehub, nixvim, nvf, noogle."
-            )
+            # Last resort: any value outside KNOWN_SOURCES is a flake ref.
+            return await _flake_ref_stats(source)
 
     elif action == "browse":
         if source == "nixos":
@@ -415,18 +446,22 @@ async def nix(
                 "To get a specific option's details, use: "
                 '{"action": "info", "query": "services.nginx.enable", "type": "option"}.'
             )
-        if source not in ["home-manager", "darwin", "nixvim", "nvf", "noogle"]:
-            return error(
-                "action=browse only supports source in: home-manager, darwin, nixvim, nvf, noogle. "
-                'Example: {"action": "browse", "query": "programs", "source": "home-manager"}'
-            )
         if source == "nixvim":
             return await asyncio.to_thread(_browse_nixvim_options, query)
         if source == "nvf":
             return await asyncio.to_thread(_browse_nvf_options, query)
         if source == "noogle":
             return await asyncio.to_thread(_browse_noogle_options, query)
-        return await asyncio.to_thread(_browse_options, source, query)
+        if source in ["home-manager", "darwin"]:
+            return await asyncio.to_thread(_browse_options, source, query)
+        if source in KNOWN_SOURCES:
+            return error(
+                "action=browse only supports source in: home-manager, darwin, nixvim, nvf, noogle, "
+                "or a flake ref (e.g. github:owner/repo). "
+                'Example: {"action": "browse", "query": "programs", "source": "home-manager"}'
+            )
+        # Last resort: any value outside KNOWN_SOURCES is a flake ref.
+        return await _flake_ref_browse(source, query)
 
     elif action == "channels":
         return await asyncio.to_thread(_list_channels)
@@ -465,7 +500,10 @@ async def nix(
     elif action == "cache":
         if not query:
             return error("Package name required for cache action")
-        return await _check_binary_cache(query, version, system)
+        if source in KNOWN_SOURCES:
+            return await _check_binary_cache(query, version, system)
+        # Last resort: any value outside KNOWN_SOURCES is a flake ref.
+        return await _flake_ref_cache(source, query, system)
 
     elif action == "store":
         if type not in ["ls", "read"]:
@@ -473,6 +511,19 @@ async def nix(
                 "Type must be one of: ls, read for store. "
                 'Example: {"action": "store", "type": "ls", "query": "/nix/store/<hash>-<name>"}'
             )
+        if source not in KNOWN_SOURCES:
+            # Last resort: source=<flake-ref> resolves the flake's materialized
+            # store path, so an empty query means the flake root rather than
+            # an error.
+            if type == "ls":
+                ls_limit = limit if limit != 20 else DEFAULT_LINE_LIMIT
+                ls_limit = min(ls_limit, MAX_LINE_LIMIT)
+                return await _flake_ref_store(source, query, "ls", ls_limit)
+            read_limit = limit
+            if limit == 20:  # Default was used, apply DEFAULT_LINE_LIMIT
+                read_limit = DEFAULT_LINE_LIMIT
+            read_limit = min(read_limit, MAX_LINE_LIMIT)
+            return await _flake_ref_store(source, query, "read", read_limit)
         if not query:
             return error(
                 "Query required for store (absolute /nix/store/ path). "
@@ -760,6 +811,15 @@ __all__ = [
     "_flake_inputs_list",
     "_flake_inputs_ls",
     "_flake_inputs_read",
+    # Arbitrary flake functions
+    "_validate_flake_ref",
+    "_flake_ref_search_packages",
+    "_flake_ref_search_options",
+    "_flake_ref_info",
+    "_flake_ref_browse",
+    "_flake_ref_stats",
+    "_flake_ref_cache",
+    "_flake_ref_store",
     # Store functions
     "_store_ls",
     "_store_read",

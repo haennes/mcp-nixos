@@ -32,6 +32,22 @@ from .flake_inputs import (
     _run_nix_command,
 )
 
+# Arbitrary flakes (source=<flake-ref>)
+from .flake_ref import (
+    _flake_available_systems,
+    _flake_ref_archive,
+    _flake_ref_browse,
+    _flake_ref_cache,
+    _flake_ref_info,
+    _flake_ref_metadata,
+    _flake_ref_search_options,
+    _flake_ref_search_packages,
+    _flake_ref_show,
+    _flake_ref_stats,
+    _flake_ref_store,
+    _validate_flake_ref,
+)
+
 # FlakeHub (Determinate Systems)
 from .flakehub import (
     _info_flakehub,
@@ -190,6 +206,19 @@ __all__ = [
     "_flake_inputs_list",
     "_flake_inputs_ls",
     "_flake_inputs_read",
+    # Arbitrary flakes
+    "_validate_flake_ref",
+    "_flake_ref_metadata",
+    "_flake_ref_show",
+    "_flake_ref_archive",
+    "_flake_available_systems",
+    "_flake_ref_search_packages",
+    "_flake_ref_search_options",
+    "_flake_ref_info",
+    "_flake_ref_browse",
+    "_flake_ref_stats",
+    "_flake_ref_cache",
+    "_flake_ref_store",
     # Store
     "_store_ls",
     "_store_read",

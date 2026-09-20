@@ -14,7 +14,7 @@ These tests verify:
 """
 
 import json
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from mcp_nixos.server import nix, nix_versions
@@ -49,10 +49,12 @@ class TestNixToolValidation:
         assert "Name required" in result
 
     @pytest.mark.asyncio
-    async def test_invalid_source(self):
-        result = await nix_fn(action="search", query="test", source="invalid")
-        assert "Error" in result
-        assert "nixos" in result and "home-manager" in result
+    async def test_invalid_source_routes_to_flake_ref(self):
+        """Any source outside KNOWN_SOURCES is treated as a flake ref."""
+        with patch("mcp_nixos.server._flake_ref_search_packages", new=AsyncMock(return_value="flake result")) as m:
+            result = await nix_fn(action="search", query="test", source="invalid")
+        m.assert_called_once_with("invalid", "test", 20)
+        assert result == "flake result"
 
     @pytest.mark.asyncio
     async def test_info_flakes_redirects_to_search(self):
@@ -63,13 +65,12 @@ class TestNixToolValidation:
         assert '"source": "flakes"' in result
 
     @pytest.mark.asyncio
-    async def test_info_unknown_source_uses_prose_not_pipes(self):
-        """Unknown sources for action=info keep the allowlist error but use commas, not pipes."""
-        result = await nix_fn(action="info", source="bogus", query="test")
+    async def test_info_flake_ref_invalid_type_uses_prose_not_pipes(self):
+        """Flake-ref sources validate info type in prose form, not pipe-separated."""
+        result = await nix_fn(action="info", source="bogus", query="test", type="programs")
         assert "Error" in result
-        assert "Unknown source" in result
+        assert "flake-ref" in result
         assert "|" not in result
-        assert "nixos, home-manager" in result
 
     @pytest.mark.asyncio
     async def test_browse_nixos_redirects_to_search(self):

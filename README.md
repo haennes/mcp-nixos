@@ -131,6 +131,7 @@ An MCP server providing accurate, real-time information about:
 - **Package versions** - Historical versions with commit hashes via [NixHub.io](https://www.nixhub.io)
 - **Binary cache status** - Check if packages are cached on cache.nixos.org with download sizes
 - **Local flake inputs** - Explore your pinned flake dependencies directly from the Nix store (requires Nix)
+- **Arbitrary flakes** - Search any flake ref's packages and module options, check its binary cache status, and read its materialized store tree (requires Nix)
 
 ## The Tools
 
@@ -172,6 +173,12 @@ nix(action, query, source, type, channel, limit, version, system)
 | `wiki` | NixOS Wiki articles (wiki.nixos.org) |
 | `nix-dev` | Official Nix documentation (nix.dev) |
 | `nixhub` | Package metadata and store paths (nixhub.io) |
+| *any flake ref* | Packages and `nixosModules.*` / `homeManagerModules.*` options from an arbitrary flake (e.g. `github:owner/repo`, `nixpkgs`) |
+
+Any `source` value that is not one of the names above is treated as a nix flake ref.
+`search`, `info`, `browse`, and `cache` then operate on that flake's outputs, and
+`store` ls/read resolves against the flake's materialized `/nix/store` tree
+(an empty query means the flake root; use `input:sub/path` to descend into an input).
 
 NVF results use canonical `vim.*` option paths. Queries may also use the shorthand
 `programs.nvf.vim.*` or the NixOS/Home Manager module path
@@ -257,6 +264,24 @@ nix(action="flake-inputs", type="ls", query="nixpkgs:pkgs/by-name")
 
 # Read a file from a flake input
 nix(action="flake-inputs", type="read", query="nixpkgs:flake.nix")
+
+# Search packages in an arbitrary flake
+nix(action="search", source="github:owner/repo", query="foo")
+
+# Search a flake's module options (nixosModules.* + homeManagerModules.*)
+nix(action="search", source="github:owner/repo", query="services.foo", type="options")
+
+# Browse a flake's option tree
+nix(action="browse", source="github:owner/repo", query="services")
+
+# Check binary cache status for one of the flake's packages
+nix(action="cache", source="github:owner/repo", query="foo")
+
+# List the flake's materialized store tree (empty query = flake root)
+nix(action="store", source="github:owner/repo", type="ls", query="")
+
+# Read a file from one of the flake's inputs
+nix(action="store", source="github:owner/repo", type="read", query="nixpkgs:flake.nix")
 
 # List or read a store path directly (requires Nix)
 nix(action="store", type="ls", query="/nix/store/<hash>-<name>")
